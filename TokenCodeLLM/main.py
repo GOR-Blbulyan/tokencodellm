@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.8: Gemini 2 Flash chat with stronger context and train-on-command GPU mode."""
+"""TokenCode AI v5.9: Gemini 2 Flash chat with stronger context and train-on-command GPU mode."""
 
 import argparse
 import importlib
@@ -25,6 +25,7 @@ tiktoken = None
 genai = None
 POWER_GPT_CLASS = None
 ML_RUNTIME_STATUS_PRINTED = False
+GEMINI_STATUS_PRINTED = False
 
 CHAT_PERSONA_BASE = (
     "Ты TokenCode AI: дружелюбный, разговорчивый и внимательный собеседник. "
@@ -296,6 +297,19 @@ def generate_with_model(model, tokenizer, prompt, generate_len):
         return decoded[len(prompt) :].split("<|endoftext|>")[0].strip()
 
 
+def generate_with_local_model(prompt: str, args) -> str | None:
+    if not ensure_ml_runtime():
+        return None
+    if not os.path.exists(args.save_model):
+        return None
+    try:
+        tokenizer = BPETokenizer()
+        model = load_model(args, tokenizer)
+        return generate_with_model(model, tokenizer, prompt, args.generate_len)
+    except Exception:
+        return None
+
+
 def extract_user_name(chat_context: list[str]) -> str | None:
     patterns = [
         r"my name is\s+([A-Za-zА-Яа-я0-9_-]{2,30})",
@@ -364,10 +378,7 @@ def fallback_response(db: CorpusDB, user_text: str, chat_context: list[str], sty
 
     local = db.search(user_text, limit=1)
     if local:
-        prefix = "Нашёл похожее в базе"
-        if style == "talkative":
-            prefix += ", давай разверну это понятнее"
-        return f"{prefix}: {local[0][1]}"
+        return local[0][1]
 
     sample = db.sample_texts(1)
     if sample:
@@ -538,15 +549,16 @@ def print_chat_help():
 
 
 def cmd_chat(args):
+    global GEMINI_STATUS_PRINTED
     db = CorpusDB(DB_PATH)
     chat_context = [f"{role}: {content}" for role, content in db.recent_conversations(limit=MAX_HISTORY)]
     active_gemini_model = args.gemini_model
     chat_style = "talkative"
     turn_count = 0
 
-    print_system("Интерактивный режим запущен. По умолчанию ответы идут через Gemini.")
+    print_system("Интерактивный режим запущен. Сначала пробую локальную модель, при недоступности — Gemini.")
     print_system("Стиль: talkative (болтливый). Можно сменить: /mode balanced")
-    print_chat_help()
+    print_system("Напиши /help чтобы увидеть все команды")
 
     while True:
         try:
@@ -670,12 +682,18 @@ def cmd_chat(args):
         spinner = AnimatedSpinner("Thinking")
         spinner.start()
 
-        response = None
-        try:
-            response = generate_with_gemini(prompt, active_gemini_model)
-            learn_from_teacher(db, user_input, response)
-        except Exception:
-            response = None
+        response = generate_with_local_model(prompt, args)
+
+        if response is None:
+            try:
+                response = generate_with_gemini(prompt, active_gemini_model)
+                GEMINI_STATUS_PRINTED = False
+                learn_from_teacher(db, user_input, response)
+            except Exception as exc:
+                if not GEMINI_STATUS_PRINTED:
+                    print_system(f"Gemini временно недоступен: {exc}")
+                    GEMINI_STATUS_PRINTED = True
+                response = None
 
         if response is None:
             response = fallback_response(db, user_input, chat_context, style=chat_style)
@@ -696,7 +714,7 @@ def cmd_chat(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.8")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.9")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
