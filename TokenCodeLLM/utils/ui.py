@@ -1,4 +1,4 @@
-"""Terminal UI helpers: banner and animated spinner."""
+"""Terminal UI helpers: banner, spinner, and chat-friendly styled output."""
 
 import itertools
 import sys
@@ -26,12 +26,40 @@ def banner(app_name: str, copyright_line: str, device_label: str):
    ██║   ██║   ██║██╔═██╗ ██╔══╝  ██║╚██╗██║
    ██║   ╚██████╔╝██║  ██╗███████╗██║ ╚████║
    ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝
-Hardware Backend: [ {device_label.upper()} ] | Tokenizer: BPE (cl100k_base)
+Backend: [ {device_label.upper()} ] | Chat Engine: Gemini-first
 """
     if TRY_RICH:
-        console.print(Panel(txt, title="System Init", style="bold magenta"))
+        console.print(Panel(txt, title="🚀 TokenCode Boot", style="bold cyan"))
     else:
         print(txt)
+
+
+def print_system(text: str):
+    if TRY_RICH:
+        console.print(f"[bold cyan]◆ System:[/bold cyan] {text}")
+    else:
+        print(f"[System] {text}")
+
+
+def print_user(text: str):
+    if TRY_RICH:
+        console.print(f"[bold green]You:[/bold green] {text}")
+    else:
+        print(f"You> {text}")
+
+
+def print_ai(text: str):
+    if TRY_RICH:
+        console.print(Panel(text, title="🤖 Gemini AI", border_style="magenta"))
+    else:
+        print(f"AI> {text}")
+
+
+def print_help_panel(help_text: str):
+    if TRY_RICH:
+        console.print(Panel(help_text, title="⌨ Commands", border_style="yellow"))
+    else:
+        print(help_text)
 
 
 class AnimatedSpinner:

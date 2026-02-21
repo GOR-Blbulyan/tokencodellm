@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.1: terminal chat + CPU Torch + Gemini teacher learning."""
+"""TokenCode AI v5.2: Gemini-first terminal chat + CPU Torch fallback."""
 
 import argparse
 import importlib
@@ -10,7 +10,7 @@ from typing import List
 from training.self_training import SyntheticGenerator, score_text_quality
 from utils.config import APP_NAME, COPYRIGHT_LINE, DB_PATH, DEFAULTS, MODEL_PATH
 from utils.knowledge import CorpusDB, external_search
-from utils.ui import AnimatedSpinner, banner
+from utils.ui import AnimatedSpinner, banner, print_ai, print_help_panel, print_system
 
 TORCH_IMPORT_ERROR = None
 TIKTOKEN_IMPORT_ERROR = None
@@ -252,7 +252,7 @@ def fallback_response(db: CorpusDB, user_text: str) -> str:
     random_sample = db.sample_texts(1)
     if random_sample:
         return f"ML-режим недоступен. Ближайшая подсказка из базы: {random_sample[0]}"
-    return "ML-режим недоступен. Запусти `init-db`, а затем `train`, когда установишь PyTorch CPU build."
+    return "Gemini недоступен. Установи GEMINI_API_KEY и пакет google-genai. Либо включи --allow-local-fallback и установи PyTorch CPU."
 
 
 def learn_from_teacher(db: CorpusDB, prompt: str, teacher_answer: str):
@@ -327,7 +327,7 @@ def cmd_teacher(args):
         teacher_answer = generate_with_gemini(args.prompt, args.gemini_model)
     except Exception as exc:
         spinner.stop()
-        print(f"[ERROR] Gemini request failed: {exc}")
+        print_system(f"Gemini request failed: {exc}")
         return
     spinner.stop()
 
@@ -391,17 +391,18 @@ def cmd_self_train(args):
 
 
 def print_chat_help():
-    print("\n[Commands]")
-    print(" /help                 - список команд")
-    print(" /stats                - статистика")
-    print(" /search <text>        - поиск по локальной БЗ")
-    print(" /search-web <text>    - внешний поиск")
-    print(" /teacher <text>       - ответ от Gemini + сохранение в обучающую базу")
-    print(" /train                - запуск обучения с дефолтами")
-    print(" /self-train           - self-training")
-    print(" /clear                - очистить контекст диалога")
-    print(" /exit                 - выход")
-    print(" Любой другой текст = сообщение ИИ\n")
+    help_text = """/help                   показать команды
+/stats                  статистика
+/search <text>          поиск по локальной БЗ
+/search-web <text>      внешний поиск
+/teacher <text>         получить ответ Gemini и сохранить в БЗ
+/model <name>           поменять Gemini-модель в рантайме
+/key                    статус API ключа (masked)
+/train                  запуск локального обучения
+/self-train             self-training
+/clear                  очистить контекст диалога
+/exit                   выход"""
+    print_help_panel(help_text)
 
 
 def cmd_chat(args):
@@ -409,8 +410,10 @@ def cmd_chat(args):
     chat_context = []
     model = None
     tokenizer = None
+    active_gemini_model = args.gemini_model
 
-    print("\n✨ Интерактивный режим запущен. Пиши сообщение или /help")
+    print_system("Интерактивный режим запущен. По умолчанию ответы идут через Gemini.")
+    print_system("Если Gemini недоступен, включается локальный fallback.")
 
     while True:
         try:
@@ -429,7 +432,14 @@ def cmd_chat(args):
             continue
         if user_input.lower() == "/clear":
             chat_context = []
-            print("[OK] Контекст очищен")
+            print_system("Контекст очищен")
+            continue
+        if user_input.lower() == "/key":
+            print_system(f"GEMINI_API_KEY: {mask_secret(os.getenv('GEMINI_API_KEY'))}")
+            continue
+        if user_input.lower().startswith("/model "):
+            active_gemini_model = user_input[7:].strip() or active_gemini_model
+            print_system(f"Gemini model switched to: {active_gemini_model}")
             continue
         if user_input.lower() == "/stats":
             cmd_stats(args)
@@ -443,9 +453,9 @@ def cmd_chat(args):
         if user_input.lower().startswith("/teacher "):
             prompt = user_input[9:].strip()
             if not prompt:
-                print("[WARN] Пустой prompt")
+                print_system("Пустой prompt")
                 continue
-            cmd_teacher(argparse.Namespace(prompt=prompt, gemini_model=args.gemini_model))
+            cmd_teacher(argparse.Namespace(prompt=prompt, gemini_model=active_gemini_model))
             continue
         if user_input.lower() == "/train":
             cmd_train(args)
@@ -455,20 +465,19 @@ def cmd_chat(args):
             continue
 
         chat_context.append(f"User: {user_input}")
-        prompt = "\n".join(chat_context[-4:]) + "\nAI: "
+        prompt = "\n".join(chat_context[-6:]) + "\nAI: "
 
         spinner = AnimatedSpinner("Thinking")
         spinner.start()
 
         response = None
-        if args.teacher_gemini:
-            try:
-                response = generate_with_gemini(prompt, args.gemini_model)
-                learn_from_teacher(db, user_input, response)
-            except Exception:
-                response = None
+        try:
+            response = generate_with_gemini(prompt, active_gemini_model)
+            learn_from_teacher(db, user_input, response)
+        except Exception:
+            response = None
 
-        if response is None and ensure_ml_runtime():
+        if response is None and args.allow_local_fallback and ensure_ml_runtime():
             if model is None or tokenizer is None:
                 tokenizer = BPETokenizer()
                 model = load_model(args, tokenizer)
@@ -481,11 +490,11 @@ def cmd_chat(args):
         spinner.stop()
         chat_context.append(f"AI: {response}")
         db.save_generation(user_input, response, score_text_quality(response))
-        print(f"\033[93mAI>\033[0m {response}")
+        print_ai(response)
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.1")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.2")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
@@ -501,8 +510,8 @@ def build_parser():
     a_chat.add_argument("--synthetic-count", type=int, default=400)
     a_chat.add_argument("--min-quality", type=float, default=0.55)
     a_chat.add_argument("--save-model", default=MODEL_PATH)
-    a_chat.add_argument("--teacher-gemini", action="store_true")
     a_chat.add_argument("--gemini-model", default="gemini-2.5-flash")
+    a_chat.add_argument("--allow-local-fallback", action="store_true")
 
     a_init = sub.add_parser("init-db")
     a_init.add_argument("--corpus-size", type=int, default=10000)
