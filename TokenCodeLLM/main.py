@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.2: Gemini-first terminal chat + CPU Torch fallback."""
+"""TokenCode AI v5.3: clean terminal UI + Gemini-first chat + reliable fallback."""
 
 import argparse
 import importlib
@@ -246,13 +246,21 @@ def generate_with_model(model, tokenizer, prompt, generate_len):
 
 
 def fallback_response(db: CorpusDB, user_text: str) -> str:
+    text = user_text.strip().lower()
+    if any(g in text for g in ["hi", "hello", "привет", "здар", "добрый"]):
+        return "Привет! Я работаю в локальном offline-режиме. Можешь спросить что угодно, я постараюсь помочь."
+    if "name" in text or "зовут" in text or "имя" in text:
+        return "Приятно познакомиться! Я TokenCode AI (offline-режим)."
+
     local = db.search(user_text, limit=1)
     if local:
-        return f"Я пока без ML-ядра, но нашёл в базе: {local[0][1]}"
-    random_sample = db.sample_texts(1)
-    if random_sample:
-        return f"ML-режим недоступен. Ближайшая подсказка из базы: {random_sample[0]}"
-    return "Gemini недоступен. Установи GEMINI_API_KEY и пакет google-genai. Либо включи --allow-local-fallback и установи PyTorch CPU."
+        return f"Нашёл похожее в базе: {local[0][1]}"
+
+    sample = db.sample_texts(1)
+    if sample:
+        return f"Пока Gemini недоступен, вот близкий пример из базы: {sample[0]}"
+
+    return "Я в offline-режиме. Выполни init-db, чтобы наполнить базу, или настрой GEMINI_API_KEY для ответов Gemini."
 
 
 def learn_from_teacher(db: CorpusDB, prompt: str, teacher_answer: str):
@@ -413,11 +421,11 @@ def cmd_chat(args):
     active_gemini_model = args.gemini_model
 
     print_system("Интерактивный режим запущен. По умолчанию ответы идут через Gemini.")
-    print_system("Если Gemini недоступен, включается локальный fallback.")
+    print_system("Если Gemini недоступен, автоматически включается локальный fallback.")
 
     while True:
         try:
-            user_input = input("\033[92mYou>\033[0m ").strip()
+            user_input = input("You> ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n[bye]")
             break
@@ -477,7 +485,7 @@ def cmd_chat(args):
         except Exception:
             response = None
 
-        if response is None and args.allow_local_fallback and ensure_ml_runtime():
+        if response is None and ensure_ml_runtime():
             if model is None or tokenizer is None:
                 tokenizer = BPETokenizer()
                 model = load_model(args, tokenizer)
@@ -494,7 +502,7 @@ def cmd_chat(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.2")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.3")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
@@ -511,7 +519,6 @@ def build_parser():
     a_chat.add_argument("--min-quality", type=float, default=0.55)
     a_chat.add_argument("--save-model", default=MODEL_PATH)
     a_chat.add_argument("--gemini-model", default="gemini-2.5-flash")
-    a_chat.add_argument("--allow-local-fallback", action="store_true")
 
     a_init = sub.add_parser("init-db")
     a_init.add_argument("--corpus-size", type=int, default=10000)

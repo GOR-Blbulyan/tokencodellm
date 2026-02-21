@@ -29,14 +29,14 @@ def banner(app_name: str, copyright_line: str, device_label: str):
 Backend: [ {device_label.upper()} ] | Chat Engine: Gemini-first
 """
     if TRY_RICH:
-        console.print(Panel(txt, title="🚀 TokenCode Boot", style="bold cyan"))
+        console.print(Panel(txt, title="TokenCode Boot", style="bold cyan"))
     else:
         print(txt)
 
 
 def print_system(text: str):
     if TRY_RICH:
-        console.print(f"[bold cyan]◆ System:[/bold cyan] {text}")
+        console.print(f"[bold cyan]System:[/bold cyan] {text}")
     else:
         print(f"[System] {text}")
 
@@ -50,14 +50,14 @@ def print_user(text: str):
 
 def print_ai(text: str):
     if TRY_RICH:
-        console.print(Panel(text, title="🤖 Gemini AI", border_style="magenta"))
+        console.print(Panel(text, title="AI", border_style="magenta"))
     else:
         print(f"AI> {text}")
 
 
 def print_help_panel(help_text: str):
     if TRY_RICH:
-        console.print(Panel(help_text, title="⌨ Commands", border_style="yellow"))
+        console.print(Panel(help_text, title="Commands", border_style="yellow"))
     else:
         print(help_text)
 
@@ -76,7 +76,7 @@ class AnimatedSpinner:
     def _run(self):
         while not self._stop.is_set():
             s = next(_spinner_cycle)
-            sys.stdout.write(f"\r\033[95m{s}\033[0m {self.text} ")
+            sys.stdout.write(f"\r{s} {self.text} ")
             sys.stdout.flush()
             time.sleep(0.08)
         sys.stdout.write("\r" + " " * (len(self.text) + 20) + "\r")
