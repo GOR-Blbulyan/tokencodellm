@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.7: Gemini 2 Flash chat with stronger context and train-on-command GPU mode."""
+"""TokenCode AI v5.8: Gemini 2 Flash chat with stronger context and train-on-command GPU mode."""
 
 import argparse
 import importlib
@@ -398,7 +398,7 @@ def cmd_init_db(args):
 
 def cmd_train(args, mode="train"):
     if not ensure_ml_runtime():
-        return
+        return False
     db = CorpusDB(DB_PATH)
     tokenizer = BPETokenizer()
     model = load_model(args, tokenizer)
@@ -424,6 +424,7 @@ def cmd_train(args, mode="train"):
     avg_loss = sum(losses) / len(losses) if losses else 0.0
     db.log_training_run(mode=mode, epochs=args.epochs, steps=args.steps_per_epoch, avg_loss=avg_loss)
     print(f"[OK] Training complete. avg_loss={avg_loss:.4f} model={args.save_model}")
+    return True
 
 
 def cmd_generate(args):
@@ -645,7 +646,18 @@ def cmd_chat(args):
             elif "deep" in cmd:
                 train_args.epochs = 10
                 train_args.steps_per_epoch = 300
-            print_system(f"Запуск обучения на устройстве: {get_device().upper()} | epochs={train_args.epochs} steps={train_args.steps_per_epoch}")
+
+            if not ensure_ml_runtime():
+                print_system(
+                    "Локальное Torch-обучение недоступно в этом окружении. "
+                    "Диалоги продолжают сохраняться в базу автоматически; после фикса PyTorch запусти /train."
+                )
+                continue
+
+            print_system(
+                f"Запуск обучения на устройстве: {get_device().upper()} "
+                f"| epochs={train_args.epochs} steps={train_args.steps_per_epoch}"
+            )
             cmd_train(train_args)
             continue
         if cmd == "/self-train":
@@ -684,7 +696,7 @@ def cmd_chat(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.7")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.8")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
