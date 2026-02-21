@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.3: clean terminal UI + Gemini-first chat + reliable fallback."""
+"""TokenCode AI v5.4: clean terminal UI + Gemini-first chat + reliable fallback."""
 
 import argparse
 import importlib
@@ -38,6 +38,28 @@ def mask_secret(value: str | None) -> str:
         return "****"
     return f"{value[:4]}***{value[-4:]}"
 
+
+
+
+def load_local_env_key():
+    """Load GEMINI_API_KEY from local ignored files if env var is absent."""
+    if os.getenv("GEMINI_API_KEY"):
+        return
+    for file_name in (".env.local", "secrets.env", ".env"):
+        if not os.path.exists(file_name):
+            continue
+        try:
+            with open(file_name, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#") or "=" not in line:
+                        continue
+                    key, value = line.split("=", 1)
+                    if key.strip() == "GEMINI_API_KEY" and value.strip():
+                        os.environ["GEMINI_API_KEY"] = value.strip().strip('"').strip("'")
+                        return
+        except OSError:
+            continue
 
 def ensure_ml_runtime() -> bool:
     """Load torch+tiktoken lazily and handle Windows DLL/runtime issues gracefully."""
@@ -83,9 +105,10 @@ def ensure_ml_runtime() -> bool:
 
 
 def get_gemini_client():
-    """Safe Gemini client bootstrap via env var only (no key in code/db/git)."""
+    """Safe Gemini client bootstrap via env var/local ignored files only."""
     global genai, GEMINI_IMPORT_ERROR
 
+    load_local_env_key()
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return None, "GEMINI_API_KEY is not set"
@@ -406,6 +429,7 @@ def print_chat_help():
 /teacher <text>         получить ответ Gemini и сохранить в БЗ
 /model <name>           поменять Gemini-модель в рантайме
 /key                    статус API ключа (masked)
+/init-db                создать локальную базу
 /train                  запуск локального обучения
 /self-train             self-training
 /clear                  очистить контекст диалога
@@ -416,12 +440,10 @@ def print_chat_help():
 def cmd_chat(args):
     db = CorpusDB(DB_PATH)
     chat_context = []
-    model = None
-    tokenizer = None
     active_gemini_model = args.gemini_model
 
     print_system("Интерактивный режим запущен. По умолчанию ответы идут через Gemini.")
-    print_system("Если Gemini недоступен, автоматически включается локальный fallback.")
+    print_system("Если Gemini недоступен, сработает локальный offline-ответ без ошибок Torch.")
 
     while True:
         try:
@@ -465,6 +487,9 @@ def cmd_chat(args):
                 continue
             cmd_teacher(argparse.Namespace(prompt=prompt, gemini_model=active_gemini_model))
             continue
+        if user_input.lower() == "/init-db":
+            cmd_init_db(argparse.Namespace(corpus_size=10000))
+            continue
         if user_input.lower() == "/train":
             cmd_train(args)
             continue
@@ -485,13 +510,6 @@ def cmd_chat(args):
         except Exception:
             response = None
 
-        if response is None and ensure_ml_runtime():
-            if model is None or tokenizer is None:
-                tokenizer = BPETokenizer()
-                model = load_model(args, tokenizer)
-                model.eval()
-            response = generate_with_model(model, tokenizer, prompt, args.generate_len)
-
         if response is None:
             response = fallback_response(db, user_input)
 
@@ -502,7 +520,7 @@ def cmd_chat(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.3")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.4")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
