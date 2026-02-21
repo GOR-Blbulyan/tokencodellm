@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.4: clean terminal UI + Gemini-first chat + reliable fallback."""
+"""TokenCode AI v5.5: context-aware Gemini chat with talkative mode."""
 
 import argparse
 import importlib
 import os
 import random
+import re
 from typing import List
 
 from training.self_training import SyntheticGenerator, score_text_quality
@@ -24,6 +25,19 @@ tiktoken = None
 genai = None
 POWER_GPT_CLASS = None
 ML_RUNTIME_STATUS_PRINTED = False
+
+CHAT_PERSONA_BASE = (
+    "Ты TokenCode AI: дружелюбный, разговорчивый и внимательный собеседник. "
+    "Отвечай естественно и по делу, но не сухо. Поддерживай диалог вопросами, "
+    "помни факты из недавнего контекста, не противоречь уже сказанному. "
+    "Если пользователь сообщает личный факт (например имя), используй его в следующих ответах. "
+    "Отвечай на языке пользователя."
+)
+
+CHAT_STYLE_GUIDE = {
+    "balanced": "Делай ответ средней длины: 3-6 предложений.",
+    "talkative": "Будь болтливым: 6-12 предложений, добавляй примеры и 1 уточняющий вопрос в конце.",
+}
 
 
 # CPU-only mode requested by user.
@@ -268,20 +282,67 @@ def generate_with_model(model, tokenizer, prompt, generate_len):
         return decoded[len(prompt) :].split("<|endoftext|>")[0].strip()
 
 
-def fallback_response(db: CorpusDB, user_text: str) -> str:
+def extract_user_name(chat_context: list[str]) -> str | None:
+    patterns = [
+        r"my name is\s+([A-Za-zА-Яа-я0-9_-]{2,30})",
+        r"меня зовут\s+([A-Za-zА-Яа-я0-9_-]{2,30})",
+        r"я\s+([A-Za-zА-Яа-я0-9_-]{2,30})",
+    ]
+    for message in reversed(chat_context):
+        if not message.startswith("User: "):
+            continue
+        text = message[6:].strip()
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+    return None
+
+
+def build_gemini_chat_prompt(chat_context: list[str], user_text: str, style: str) -> str:
+    recent = "\n".join(chat_context[-12:])
+    style_instruction = CHAT_STYLE_GUIDE.get(style, CHAT_STYLE_GUIDE["balanced"])
+    return (
+        f"{CHAT_PERSONA_BASE}\n"
+        f"{style_instruction}\n"
+        "Ниже история диалога. Сначала тихо учти контекст, затем дай цельный ответ без служебных пометок.\n\n"
+        f"История:\n{recent}\n"
+        f"User: {user_text}\n"
+        "AI:"
+    )
+
+
+def fallback_response(db: CorpusDB, user_text: str, chat_context: list[str], style: str = "balanced") -> str:
     text = user_text.strip().lower()
+    user_name = extract_user_name(chat_context)
     if any(g in text for g in ["hi", "hello", "привет", "здар", "добрый"]):
-        return "Привет! Я работаю в локальном offline-режиме. Можешь спросить что угодно, я постараюсь помочь."
+        if user_name:
+            return (
+                f"Привет, {user_name}! Я сейчас в локальном offline-режиме, но всё равно могу болтать и помогать. "
+                "Расскажи, что тебе интересно: идеи, код, обучение ИИ или просто разговор?"
+            )
+        return (
+            "Привет! Я сейчас в локальном offline-режиме, но всё равно могу поддержать разговор. "
+            "Можешь спросить что угодно: от ИИ и кода до обычной болтовни."
+        )
     if "name" in text or "зовут" in text or "имя" in text:
-        return "Приятно познакомиться! Я TokenCode AI (offline-режим)."
+        if user_name:
+            return f"Приятно познакомиться, {user_name}! Я TokenCode AI и запомнил твоё имя в текущем чате."
+        return "Приятно познакомиться! Я TokenCode AI (offline-режим). Можешь написать: 'Меня зовут ...'"
 
     local = db.search(user_text, limit=1)
     if local:
-        return f"Нашёл похожее в базе: {local[0][1]}"
+        prefix = "Нашёл похожее в базе"
+        if style == "talkative":
+            prefix += ", давай разверну это понятнее"
+        return f"{prefix}: {local[0][1]}"
 
     sample = db.sample_texts(1)
     if sample:
-        return f"Пока Gemini недоступен, вот близкий пример из базы: {sample[0]}"
+        return (
+            "Gemini сейчас недоступен, поэтому отвечаю из локальной базы. "
+            f"Вот близкий пример: {sample[0]}"
+        )
 
     return "Я в offline-режиме. Выполни init-db, чтобы наполнить базу, или настрой GEMINI_API_KEY для ответов Gemini."
 
@@ -428,6 +489,8 @@ def print_chat_help():
 /search-web <text>      внешний поиск
 /teacher <text>         получить ответ Gemini и сохранить в БЗ
 /model <name>           поменять Gemini-модель в рантайме
+/mode <balanced|talkative> стиль ответа (обычный/болтливый)
+/context                показать последние реплики контекста
 /key                    статус API ключа (masked)
 /init-db                создать локальную базу
 /train                  запуск локального обучения
@@ -441,8 +504,10 @@ def cmd_chat(args):
     db = CorpusDB(DB_PATH)
     chat_context = []
     active_gemini_model = args.gemini_model
+    chat_style = "talkative"
 
     print_system("Интерактивный режим запущен. По умолчанию ответы идут через Gemini.")
+    print_system("Стиль: talkative (болтливый). Можно сменить: /mode balanced")
     print_system("Если Gemini недоступен, сработает локальный offline-ответ без ошибок Torch.")
 
     while True:
@@ -471,6 +536,22 @@ def cmd_chat(args):
             active_gemini_model = user_input[7:].strip() or active_gemini_model
             print_system(f"Gemini model switched to: {active_gemini_model}")
             continue
+        if user_input.lower().startswith("/mode "):
+            mode = user_input[6:].strip().lower()
+            if mode not in CHAT_STYLE_GUIDE:
+                print_system("Неверный режим. Используй: /mode balanced или /mode talkative")
+                continue
+            chat_style = mode
+            print_system(f"Режим диалога: {chat_style}")
+            continue
+        if user_input.lower() == "/context":
+            if not chat_context:
+                print_system("Контекст пока пуст")
+            else:
+                print_system("Последние реплики контекста:")
+                for line in chat_context[-8:]:
+                    print(line)
+            continue
         if user_input.lower() == "/stats":
             cmd_stats(args)
             continue
@@ -497,8 +578,7 @@ def cmd_chat(args):
             cmd_self_train(args)
             continue
 
-        chat_context.append(f"User: {user_input}")
-        prompt = "\n".join(chat_context[-6:]) + "\nAI: "
+        prompt = build_gemini_chat_prompt(chat_context, user_input, chat_style)
 
         spinner = AnimatedSpinner("Thinking")
         spinner.start()
@@ -511,16 +591,17 @@ def cmd_chat(args):
             response = None
 
         if response is None:
-            response = fallback_response(db, user_input)
+            response = fallback_response(db, user_input, chat_context, style=chat_style)
 
         spinner.stop()
+        chat_context.append(f"User: {user_input}")
         chat_context.append(f"AI: {response}")
         db.save_generation(user_input, response, score_text_quality(response))
         print_ai(response)
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.4")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.5")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
