@@ -50,6 +50,25 @@ class CorpusDB:
             );
         """
         )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+        """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_memory (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+        """
+        )
         self.conn.commit()
 
     def insert_texts(self, texts: List[str]):
@@ -63,6 +82,46 @@ class CorpusDB:
             "INSERT INTO generations (prompt, response, quality, created_at) VALUES (?, ?, ?, ?)",
             (prompt, response, quality, now),
         )
+        self.conn.commit()
+
+    def save_turn(self, role: str, content: str):
+        now = int(time.time())
+        self.conn.execute(
+            "INSERT INTO conversations (role, content, created_at) VALUES (?, ?, ?)",
+            (role, content, now),
+        )
+        self.conn.execute("INSERT INTO texts (text, created_at) VALUES (?, ?)", (f"{role}: {content}", now))
+        self.conn.commit()
+
+    def recent_conversations(self, limit: int = 20) -> List[Tuple[str, str]]:
+        cur = self.conn.execute(
+            "SELECT role, content FROM conversations ORDER BY id DESC LIMIT ?",
+            (limit,),
+        )
+        rows = list(reversed(cur.fetchall()))
+        return [(str(r[0]), str(r[1])) for r in rows]
+
+    def count_conversations(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM conversations;").fetchone()[0]
+
+    def set_memory(self, key: str, value: str):
+        now = int(time.time())
+        self.conn.execute(
+            "INSERT OR REPLACE INTO user_memory (key, value, updated_at) VALUES (?, ?, ?)",
+            (key, value, now),
+        )
+        self.conn.commit()
+
+    def get_memory(self) -> dict[str, str]:
+        cur = self.conn.execute("SELECT key, value FROM user_memory ORDER BY key")
+        return {str(row[0]): str(row[1]) for row in cur.fetchall()}
+
+    def clear_all(self):
+        self.conn.execute("DELETE FROM texts")
+        self.conn.execute("DELETE FROM generations")
+        self.conn.execute("DELETE FROM training_runs")
+        self.conn.execute("DELETE FROM conversations")
+        self.conn.execute("DELETE FROM user_memory")
         self.conn.commit()
 
     def log_training_run(self, mode: str, epochs: int, steps: int, avg_loss: float | None):
@@ -98,6 +157,8 @@ class CorpusDB:
             "avg_quality": float(avg_quality),
             "training_runs": training_runs,
             "last_loss": float(last_loss[0]) if last_loss else None,
+            "conversations": self.count_conversations(),
+            "memory_keys": len(self.get_memory()),
         }
 
 

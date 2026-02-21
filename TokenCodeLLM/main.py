@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.5: context-aware Gemini chat with talkative mode."""
+"""TokenCode AI v5.6: Gemini-powered chat with memory, history and richer commands."""
 
 import argparse
 import importlib
@@ -38,6 +38,11 @@ CHAT_STYLE_GUIDE = {
     "balanced": "Делай ответ средней длины: 3-6 предложений.",
     "talkative": "Будь болтливым: 6-12 предложений, добавляй примеры и 1 уточняющий вопрос в конце.",
 }
+
+
+MAX_HISTORY = 30
+LEARN_EVERY = 5
+DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
 
 
 # CPU-only mode requested by user.
@@ -312,6 +317,17 @@ def build_gemini_chat_prompt(chat_context: list[str], user_text: str, style: str
     )
 
 
+def extract_memory_facts(db: CorpusDB, user_msg: str):
+    msg_lower = user_msg.lower()
+    name_match = re.search(r"(?:my name is|меня зовут)\s+([A-Za-zА-Яа-я0-9_-]{2,30})", user_msg, re.IGNORECASE)
+    if name_match:
+        db.set_memory("name", name_match.group(1))
+    if "python" in msg_lower:
+        db.set_memory("likes_python", "yes")
+    if "rust" in msg_lower:
+        db.set_memory("knows_rust", "yes")
+
+
 def fallback_response(db: CorpusDB, user_text: str, chat_context: list[str], style: str = "balanced") -> str:
     text = user_text.strip().lower()
     user_name = extract_user_name(chat_context)
@@ -483,18 +499,20 @@ def cmd_self_train(args):
 
 
 def print_chat_help():
-    help_text = """/help                   показать команды
-/stats                  статистика
+    help_text = """/train                  GPU/CPU-обучение (3 эпохи × 200 шагов)
+/train fast             быстрое обучение (1 эпоха × 100 шагов)
+/train deep             глубокое обучение (10 эпох × 300 шагов)
 /search <text>          поиск по локальной БЗ
-/search-web <text>      внешний поиск
-/teacher <text>         получить ответ Gemini и сохранить в БЗ
+/db stats               статистика базы данных
+/db clear               очистить всю базу
+/history                показать историю диалога
+/memory                 показать, что ИИ запомнил о тебе
+/model info             информация о модели и устройстве
 /model <name>           поменять Gemini-модель в рантайме
-/mode <balanced|talkative> стиль ответа (обычный/болтливый)
-/context                показать последние реплики контекста
+/mode <balanced|talkative> стиль ответа
+/context                показать текущий контекст
 /key                    статус API ключа (masked)
 /init-db                создать локальную базу
-/train                  запуск локального обучения
-/self-train             self-training
 /clear                  очистить контекст диалога
 /exit                   выход"""
     print_help_panel(help_text)
@@ -502,13 +520,14 @@ def print_chat_help():
 
 def cmd_chat(args):
     db = CorpusDB(DB_PATH)
-    chat_context = []
+    chat_context = [f"{role}: {content}" for role, content in db.recent_conversations(limit=MAX_HISTORY)]
     active_gemini_model = args.gemini_model
     chat_style = "talkative"
+    turn_count = 0
 
     print_system("Интерактивный режим запущен. По умолчанию ответы идут через Gemini.")
     print_system("Стиль: talkative (болтливый). Можно сменить: /mode balanced")
-    print_system("Если Gemini недоступен, сработает локальный offline-ответ без ошибок Torch.")
+    print_system("Команды: /help, /train, /db stats, /memory, /history, /model info")
 
     while True:
         try:
@@ -519,24 +538,54 @@ def cmd_chat(args):
 
         if not user_input:
             continue
-        if user_input.lower() in {"/exit", "exit", "quit", "/quit"}:
+        cmd = user_input.lower()
+        if cmd in {"/exit", "exit", "quit", "/quit"}:
             print("[bye]")
             break
-        if user_input.lower() == "/help":
+        if cmd == "/help":
             print_chat_help()
             continue
-        if user_input.lower() == "/clear":
+        if cmd == "/clear":
             chat_context = []
             print_system("Контекст очищен")
             continue
-        if user_input.lower() == "/key":
+        if cmd == "/history":
+            if not chat_context:
+                print_system("История пуста")
+            else:
+                for line in chat_context[-MAX_HISTORY:]:
+                    print(line)
+            continue
+        if cmd == "/memory":
+            memory = db.get_memory()
+            if not memory:
+                print_system("Память пока пуста")
+            else:
+                for key, value in memory.items():
+                    print(f" - {key}: {value}")
+            continue
+        if cmd == "/db stats":
+            cmd_stats(args)
+            continue
+        if cmd == "/db clear":
+            db.clear_all()
+            chat_context = []
+            print_system("База и контекст очищены")
+            continue
+        if cmd == "/model info":
+            ml_runtime = "ok" if ensure_ml_runtime() else "unavailable"
+            print_system(
+                f"Gemini={active_gemini_model} | Device={get_device().upper()} | ML runtime={ml_runtime}"
+            )
+            continue
+        if cmd == "/key":
             print_system(f"GEMINI_API_KEY: {mask_secret(os.getenv('GEMINI_API_KEY'))}")
             continue
-        if user_input.lower().startswith("/model "):
+        if cmd.startswith("/model "):
             active_gemini_model = user_input[7:].strip() or active_gemini_model
             print_system(f"Gemini model switched to: {active_gemini_model}")
             continue
-        if user_input.lower().startswith("/mode "):
+        if cmd.startswith("/mode "):
             mode = user_input[6:].strip().lower()
             if mode not in CHAT_STYLE_GUIDE:
                 print_system("Неверный режим. Используй: /mode balanced или /mode talkative")
@@ -544,7 +593,7 @@ def cmd_chat(args):
             chat_style = mode
             print_system(f"Режим диалога: {chat_style}")
             continue
-        if user_input.lower() == "/context":
+        if cmd == "/context":
             if not chat_context:
                 print_system("Контекст пока пуст")
             else:
@@ -552,29 +601,35 @@ def cmd_chat(args):
                 for line in chat_context[-8:]:
                     print(line)
             continue
-        if user_input.lower() == "/stats":
-            cmd_stats(args)
-            continue
-        if user_input.lower().startswith("/search-web "):
+        if cmd.startswith("/search-web "):
             cmd_search(argparse.Namespace(query=user_input[12:].strip(), limit=5, external=True))
             continue
-        if user_input.lower().startswith("/search "):
-            cmd_search(argparse.Namespace(query=user_input[8:].strip(), limit=5, external=False))
+        if cmd.startswith("/search "):
+            cmd_search(argparse.Namespace(query=user_input[8:].strip(), limit=8, external=False))
             continue
-        if user_input.lower().startswith("/teacher "):
+        if cmd.startswith("/teacher "):
             prompt = user_input[9:].strip()
             if not prompt:
                 print_system("Пустой prompt")
                 continue
             cmd_teacher(argparse.Namespace(prompt=prompt, gemini_model=active_gemini_model))
             continue
-        if user_input.lower() == "/init-db":
+        if cmd == "/init-db":
             cmd_init_db(argparse.Namespace(corpus_size=10000))
             continue
-        if user_input.lower() == "/train":
-            cmd_train(args)
+        if cmd.startswith("/train"):
+            train_args = argparse.Namespace(**vars(args))
+            train_args.epochs = 3
+            train_args.steps_per_epoch = 200
+            if "fast" in cmd:
+                train_args.epochs = 1
+                train_args.steps_per_epoch = 100
+            elif "deep" in cmd:
+                train_args.epochs = 10
+                train_args.steps_per_epoch = 300
+            cmd_train(train_args)
             continue
-        if user_input.lower() == "/self-train":
+        if cmd == "/self-train":
             cmd_self_train(args)
             continue
 
@@ -596,12 +651,20 @@ def cmd_chat(args):
         spinner.stop()
         chat_context.append(f"User: {user_input}")
         chat_context.append(f"AI: {response}")
+        chat_context = chat_context[-MAX_HISTORY:]
+        db.save_turn("User", user_input)
+        db.save_turn("AI", response)
         db.save_generation(user_input, response, score_text_quality(response))
+        extract_memory_facts(db, user_input)
         print_ai(response)
+
+        turn_count += 1
+        if turn_count % LEARN_EVERY == 0:
+            print_system(f"Авто-обучение данных: накоплено {db.stats()['texts']} текстов. Команда: /train")
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.5")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.6")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
@@ -617,7 +680,7 @@ def build_parser():
     a_chat.add_argument("--synthetic-count", type=int, default=400)
     a_chat.add_argument("--min-quality", type=float, default=0.55)
     a_chat.add_argument("--save-model", default=MODEL_PATH)
-    a_chat.add_argument("--gemini-model", default="gemini-2.5-flash")
+    a_chat.add_argument("--gemini-model", default=DEFAULT_GEMINI_MODEL)
 
     a_init = sub.add_parser("init-db")
     a_init.add_argument("--corpus-size", type=int, default=10000)
@@ -644,7 +707,7 @@ def build_parser():
 
     a_teacher = sub.add_parser("teacher")
     a_teacher.add_argument("prompt")
-    a_teacher.add_argument("--gemini-model", default="gemini-2.5-flash")
+    a_teacher.add_argument("--gemini-model", default=DEFAULT_GEMINI_MODEL)
 
     a_search = sub.add_parser("search")
     a_search.add_argument("query")
