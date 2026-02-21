@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.6: Gemini-powered chat with memory, history and richer commands."""
+"""TokenCode AI v5.7: Gemini 2 Flash chat with stronger context and train-on-command GPU mode."""
 
 import argparse
 import importlib
@@ -36,17 +36,26 @@ CHAT_PERSONA_BASE = (
 
 CHAT_STYLE_GUIDE = {
     "balanced": "Делай ответ средней длины: 3-6 предложений.",
-    "talkative": "Будь болтливым: 6-12 предложений, добавляй примеры и 1 уточняющий вопрос в конце.",
+    "talkative": "Будь очень болтливым: 8-14 предложений, добавляй примеры, короткие рассуждения и 1-2 уточняющих вопроса в конце.",
 }
 
 
 MAX_HISTORY = 30
 LEARN_EVERY = 5
-DEFAULT_GEMINI_MODEL = "gemini-1.5-flash"
+DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
 
 
-# CPU-only mode requested by user.
 def get_device() -> str:
+    """Preferred PyTorch device for local model training/generation."""
+    if torch is None:
+        return "cpu"
+    try:
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        return "cpu"
     return "cpu"
 
 
@@ -304,12 +313,19 @@ def extract_user_name(chat_context: list[str]) -> str | None:
     return None
 
 
-def build_gemini_chat_prompt(chat_context: list[str], user_text: str, style: str) -> str:
-    recent = "\n".join(chat_context[-12:])
+def build_gemini_chat_prompt(chat_context: list[str], user_text: str, style: str, memory: dict[str, str] | None = None) -> str:
+    recent = "\n".join(chat_context[-MAX_HISTORY:])
     style_instruction = CHAT_STYLE_GUIDE.get(style, CHAT_STYLE_GUIDE["balanced"])
+    memory_hint = ""
+    if memory:
+        mem_items = ", ".join(f"{k}={v}" for k, v in sorted(memory.items()))
+        memory_hint = f"\nПамять о пользователе: {mem_items}\n"
     return (
         f"{CHAT_PERSONA_BASE}\n"
         f"{style_instruction}\n"
+        "Ты умный ассистент: делай выводы по контексту, не теряй нить диалога и не противоречь прошлым ответам.\n"
+        "Если пользователь просит кратко — сокращай ответ, иначе отвечай развёрнуто и живо.\n"
+        f"{memory_hint}"
         "Ниже история диалога. Сначала тихо учти контекст, затем дай цельный ответ без служебных пометок.\n\n"
         f"История:\n{recent}\n"
         f"User: {user_text}\n"
@@ -465,7 +481,7 @@ def cmd_doctor(_args):
     print("[Doctor] Runtime diagnostics")
     ok = ensure_ml_runtime()
     print(f" - ml_runtime: {'ok' if ok else 'unavailable'}")
-    print(" - torch_device_mode: cpu-forced")
+    print(f" - torch_device_mode: {get_device()}")
     print(f" - torch_error: {TORCH_IMPORT_ERROR if TORCH_IMPORT_ERROR else 'none'}")
     print(f" - tiktoken_error: {TIKTOKEN_IMPORT_ERROR if TIKTOKEN_IMPORT_ERROR else 'none'}")
     gemini_key = os.getenv("GEMINI_API_KEY")
@@ -484,6 +500,8 @@ def cmd_stats(_args):
     print(f" - training_runs: {stats['training_runs']}")
     print(f" - avg_generation_quality: {stats['avg_quality']:.3f}")
     print(f" - last_loss: {stats['last_loss'] if stats['last_loss'] is not None else 'n/a'}")
+    print(f" - conversations: {stats['conversations']}")
+    print(f" - memory_keys: {stats['memory_keys']}")
 
 
 def cmd_self_train(args):
@@ -527,7 +545,7 @@ def cmd_chat(args):
 
     print_system("Интерактивный режим запущен. По умолчанию ответы идут через Gemini.")
     print_system("Стиль: talkative (болтливый). Можно сменить: /mode balanced")
-    print_system("Команды: /help, /train, /db stats, /memory, /history, /model info")
+    print_chat_help()
 
     while True:
         try:
@@ -627,13 +645,15 @@ def cmd_chat(args):
             elif "deep" in cmd:
                 train_args.epochs = 10
                 train_args.steps_per_epoch = 300
+            print_system(f"Запуск обучения на устройстве: {get_device().upper()} | epochs={train_args.epochs} steps={train_args.steps_per_epoch}")
             cmd_train(train_args)
             continue
         if cmd == "/self-train":
             cmd_self_train(args)
             continue
 
-        prompt = build_gemini_chat_prompt(chat_context, user_input, chat_style)
+        memory_context = db.get_memory()
+        prompt = build_gemini_chat_prompt(chat_context, user_input, chat_style, memory_context if memory_context else None)
 
         spinner = AnimatedSpinner("Thinking")
         spinner.start()
@@ -660,11 +680,11 @@ def cmd_chat(args):
 
         turn_count += 1
         if turn_count % LEARN_EVERY == 0:
-            print_system(f"Авто-обучение данных: накоплено {db.stats()['texts']} текстов. Команда: /train")
+            print_system(f"Диалог автоматически сохранён в базу: {db.stats()['texts']} текстов. Для дообучения локальной модели запусти /train")
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.6")
+    p = argparse.ArgumentParser(description="TokenCode AI v5.7")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
