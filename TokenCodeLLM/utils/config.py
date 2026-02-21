@@ -2,7 +2,7 @@
 
 DB_PATH = "tokencode_corpus.db"
 MODEL_PATH = "tokencode_power_model.pt"
-APP_NAME = "TokenCode AI v5.9"
+APP_NAME = "TokenCode AI v6.0"
 COPYRIGHT_LINE = "© 2026 TokenCode"
 
 DEFAULTS = {

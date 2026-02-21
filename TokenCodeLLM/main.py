@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""TokenCode AI v5.9: Gemini 2 Flash chat with stronger context and train-on-command GPU mode."""
+"""TokenCode AI v6.0: Local Torch + HuggingFace Router Qwen fallback chat."""
 
 import argparse
 import importlib
@@ -15,7 +15,7 @@ from utils.ui import AnimatedSpinner, banner, print_ai, print_help_panel, print_
 
 TORCH_IMPORT_ERROR = None
 TIKTOKEN_IMPORT_ERROR = None
-GEMINI_IMPORT_ERROR = None
+PROVIDER_IMPORT_ERROR = None
 
 # lazy runtime modules
 torch = None
@@ -25,7 +25,7 @@ tiktoken = None
 genai = None
 POWER_GPT_CLASS = None
 ML_RUNTIME_STATUS_PRINTED = False
-GEMINI_STATUS_PRINTED = False
+PROVIDER_STATUS_PRINTED = False
 
 CHAT_PERSONA_BASE = (
     "Ты TokenCode AI: дружелюбный, разговорчивый и внимательный собеседник. "
@@ -43,7 +43,8 @@ CHAT_STYLE_GUIDE = {
 
 MAX_HISTORY = 30
 LEARN_EVERY = 5
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
+DEFAULT_QWEN_MODEL = "Qwen/Qwen3.5-397B-A17B:novita"
+HF_ROUTER_BASE_URL = "https://router.huggingface.co/v1"
 
 
 def get_device() -> str:
@@ -71,8 +72,8 @@ def mask_secret(value: str | None) -> str:
 
 
 def load_local_env_key():
-    """Load GEMINI_API_KEY from local ignored files if env var is absent."""
-    if os.getenv("GEMINI_API_KEY"):
+    """Load HF_TOKEN/GEMINI_API_KEY from local ignored files if env vars are absent."""
+    if os.getenv("GEMINI_API_KEY") and os.getenv("HF_TOKEN"):
         return
     for file_name in (".env.local", "secrets.env", ".env"):
         if not os.path.exists(file_name):
@@ -84,9 +85,11 @@ def load_local_env_key():
                     if not line or line.startswith("#") or "=" not in line:
                         continue
                     key, value = line.split("=", 1)
-                    if key.strip() == "GEMINI_API_KEY" and value.strip():
-                        os.environ["GEMINI_API_KEY"] = value.strip().strip('"').strip("'")
-                        return
+                    cleaned = value.strip().strip('"').strip("'")
+                    if key.strip() == "GEMINI_API_KEY" and cleaned:
+                        os.environ["GEMINI_API_KEY"] = cleaned
+                    if key.strip() == "HF_TOKEN" and cleaned:
+                        os.environ["HF_TOKEN"] = cleaned
         except OSError:
             continue
 
@@ -133,37 +136,39 @@ def ensure_ml_runtime() -> bool:
     return True
 
 
-def get_gemini_client():
-    """Safe Gemini client bootstrap via env var/local ignored files only."""
-    global genai, GEMINI_IMPORT_ERROR
+def get_provider_client():
+    """Create OpenAI-compatible client for HuggingFace Router."""
+    global PROVIDER_IMPORT_ERROR
 
     load_local_env_key()
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return None, "GEMINI_API_KEY is not set"
-
-    if genai is None:
-        try:
-            from google import genai as imported_genai
-
-            genai = imported_genai
-            GEMINI_IMPORT_ERROR = None
-        except Exception as exc:
-            GEMINI_IMPORT_ERROR = exc
-            return None, f"google-genai import failed: {exc}"
+    token = os.getenv("HF_TOKEN")
+    if not token:
+        return None, "HF_TOKEN is not set"
 
     try:
-        return genai.Client(api_key=api_key), None
+        openai_module = importlib.import_module("openai")
+        PROVIDER_IMPORT_ERROR = None
     except Exception as exc:
-        return None, f"Gemini client init failed: {exc}"
+        PROVIDER_IMPORT_ERROR = exc
+        return None, f"openai import failed: {exc}"
+
+    try:
+        client = openai_module.OpenAI(base_url=HF_ROUTER_BASE_URL, api_key=token)
+        return client, None
+    except Exception as exc:
+        return None, f"Provider client init failed: {exc}"
 
 
-def generate_with_gemini(prompt: str, model_name: str) -> str:
-    client, err = get_gemini_client()
+def generate_with_provider(prompt: str, model_name: str) -> str:
+    client, err = get_provider_client()
     if err:
         raise RuntimeError(err)
-    response = client.models.generate_content(model=model_name, contents=prompt)
-    return (response.text or "").strip()
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    message = completion.choices[0].message
+    return (message.content or "").strip()
 
 
 class BPETokenizer:
@@ -327,7 +332,7 @@ def extract_user_name(chat_context: list[str]) -> str | None:
     return None
 
 
-def build_gemini_chat_prompt(chat_context: list[str], user_text: str, style: str, memory: dict[str, str] | None = None) -> str:
+def build_chat_prompt(chat_context: list[str], user_text: str, style: str, memory: dict[str, str] | None = None) -> str:
     recent = "\n".join(chat_context[-MAX_HISTORY:])
     style_instruction = CHAT_STYLE_GUIDE.get(style, CHAT_STYLE_GUIDE["balanced"])
     memory_hint = ""
@@ -387,7 +392,7 @@ def fallback_response(db: CorpusDB, user_text: str, chat_context: list[str], sty
             f"Вот близкий пример: {sample[0]}"
         )
 
-    return "Я в offline-режиме. Выполни init-db, чтобы наполнить базу, или настрой GEMINI_API_KEY для ответов Gemini."
+    return "Я в offline-режиме. Выполни init-db, чтобы наполнить базу, или настрой HF_TOKEN для ответов Qwen через HuggingFace Router."
 
 
 def learn_from_teacher(db: CorpusDB, prompt: str, teacher_answer: str):
@@ -460,10 +465,10 @@ def cmd_teacher(args):
     spinner = AnimatedSpinner("Gemini teacher")
     spinner.start()
     try:
-        teacher_answer = generate_with_gemini(args.prompt, args.gemini_model)
+        teacher_answer = generate_with_provider(args.prompt, args.qwen_model)
     except Exception as exc:
         spinner.stop()
-        print_system(f"Gemini request failed: {exc}")
+        print_system(f"Qwen request failed: {exc}")
         return
     spinner.stop()
 
@@ -496,11 +501,11 @@ def cmd_doctor(_args):
     print(f" - torch_device_mode: {get_device()}")
     print(f" - torch_error: {TORCH_IMPORT_ERROR if TORCH_IMPORT_ERROR else 'none'}")
     print(f" - tiktoken_error: {TIKTOKEN_IMPORT_ERROR if TIKTOKEN_IMPORT_ERROR else 'none'}")
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    print(f" - gemini_key: {mask_secret(gemini_key)}")
-    client, err = get_gemini_client()
-    print(f" - gemini_client: {'ok' if client else f'unavailable ({err})'}")
-    print(" - recommendation: keep GEMINI_API_KEY only in environment variables")
+    hf_token = os.getenv("HF_TOKEN")
+    print(f" - hf_token: {mask_secret(hf_token)}")
+    client, err = get_provider_client()
+    print(f" - qwen_provider_client: {'ok' if client else f'unavailable ({err})'}")
+    print(" - recommendation: keep HF_TOKEN only in environment variables")
 
 
 def cmd_stats(_args):
@@ -538,10 +543,10 @@ def print_chat_help():
 /history                показать историю диалога
 /memory                 показать, что ИИ запомнил о тебе
 /model info             информация о модели и устройстве
-/model <name>           поменять Gemini-модель в рантайме
+/model <name>           поменять Qwen-модель в рантайме
 /mode <balanced|talkative> стиль ответа
 /context                показать текущий контекст
-/key                    статус API ключа (masked)
+/key                    статус HF_TOKEN (masked)
 /init-db                создать локальную базу
 /clear                  очистить контекст диалога
 /exit                   выход"""
@@ -549,14 +554,14 @@ def print_chat_help():
 
 
 def cmd_chat(args):
-    global GEMINI_STATUS_PRINTED
+    global PROVIDER_STATUS_PRINTED
     db = CorpusDB(DB_PATH)
     chat_context = [f"{role}: {content}" for role, content in db.recent_conversations(limit=MAX_HISTORY)]
-    active_gemini_model = args.gemini_model
+    active_qwen_model = args.qwen_model
     chat_style = "talkative"
     turn_count = 0
 
-    print_system("Интерактивный режим запущен. Сначала пробую локальную модель, при недоступности — Gemini.")
+    print_system("Интерактивный режим запущен. Сначала пробую локальную модель, при недоступности — Qwen (HF Router).")
     print_system("Стиль: talkative (болтливый). Можно сменить: /mode balanced")
     print_system("Напиши /help чтобы увидеть все команды")
 
@@ -606,15 +611,15 @@ def cmd_chat(args):
         if cmd == "/model info":
             ml_runtime = "ok" if ensure_ml_runtime() else "unavailable"
             print_system(
-                f"Gemini={active_gemini_model} | Device={get_device().upper()} | ML runtime={ml_runtime}"
+                f"Qwen={active_qwen_model} | Device={get_device().upper()} | ML runtime={ml_runtime}"
             )
             continue
         if cmd == "/key":
-            print_system(f"GEMINI_API_KEY: {mask_secret(os.getenv('GEMINI_API_KEY'))}")
+            print_system(f"HF_TOKEN: {mask_secret(os.getenv('HF_TOKEN'))}")
             continue
         if cmd.startswith("/model "):
-            active_gemini_model = user_input[7:].strip() or active_gemini_model
-            print_system(f"Gemini model switched to: {active_gemini_model}")
+            active_qwen_model = user_input[7:].strip() or active_qwen_model
+            print_system(f"Qwen model switched to: {active_qwen_model}")
             continue
         if cmd.startswith("/mode "):
             mode = user_input[6:].strip().lower()
@@ -643,7 +648,7 @@ def cmd_chat(args):
             if not prompt:
                 print_system("Пустой prompt")
                 continue
-            cmd_teacher(argparse.Namespace(prompt=prompt, gemini_model=active_gemini_model))
+            cmd_teacher(argparse.Namespace(prompt=prompt, qwen_model=active_qwen_model))
             continue
         if cmd == "/init-db":
             cmd_init_db(argparse.Namespace(corpus_size=10000))
@@ -677,7 +682,7 @@ def cmd_chat(args):
             continue
 
         memory_context = db.get_memory()
-        prompt = build_gemini_chat_prompt(chat_context, user_input, chat_style, memory_context if memory_context else None)
+        prompt = build_chat_prompt(chat_context, user_input, chat_style, memory_context if memory_context else None)
 
         spinner = AnimatedSpinner("Thinking")
         spinner.start()
@@ -686,13 +691,13 @@ def cmd_chat(args):
 
         if response is None:
             try:
-                response = generate_with_gemini(prompt, active_gemini_model)
-                GEMINI_STATUS_PRINTED = False
+                response = generate_with_provider(prompt, active_qwen_model)
+                PROVIDER_STATUS_PRINTED = False
                 learn_from_teacher(db, user_input, response)
             except Exception as exc:
-                if not GEMINI_STATUS_PRINTED:
-                    print_system(f"Gemini временно недоступен: {exc}")
-                    GEMINI_STATUS_PRINTED = True
+                if not PROVIDER_STATUS_PRINTED:
+                    print_system(f"Qwen provider временно недоступен: {exc}")
+                    PROVIDER_STATUS_PRINTED = True
                 response = None
 
         if response is None:
@@ -714,7 +719,7 @@ def cmd_chat(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(description="TokenCode AI v5.9")
+    p = argparse.ArgumentParser(description="TokenCode AI v6.0")
     sub = p.add_subparsers(dest="command", required=False)
 
     a_chat = sub.add_parser("chat")
@@ -730,7 +735,7 @@ def build_parser():
     a_chat.add_argument("--synthetic-count", type=int, default=400)
     a_chat.add_argument("--min-quality", type=float, default=0.55)
     a_chat.add_argument("--save-model", default=MODEL_PATH)
-    a_chat.add_argument("--gemini-model", default=DEFAULT_GEMINI_MODEL)
+    a_chat.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL)
 
     a_init = sub.add_parser("init-db")
     a_init.add_argument("--corpus-size", type=int, default=10000)
@@ -757,7 +762,7 @@ def build_parser():
 
     a_teacher = sub.add_parser("teacher")
     a_teacher.add_argument("prompt")
-    a_teacher.add_argument("--gemini-model", default=DEFAULT_GEMINI_MODEL)
+    a_teacher.add_argument("--qwen-model", default=DEFAULT_QWEN_MODEL)
 
     a_search = sub.add_parser("search")
     a_search.add_argument("query")

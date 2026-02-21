@@ -26,7 +26,7 @@ def banner(app_name: str, copyright_line: str, device_label: str):
    ██║   ██║   ██║██╔═██╗ ██╔══╝  ██║╚██╗██║
    ██║   ╚██████╔╝██║  ██╗███████╗██║ ╚████║
    ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝╚═╝  ╚═══╝
-Backend: [ {device_label.upper()} ] | Chat Engine: Gemini-first
+Backend: [ {device_label.upper()} ] | Chat Engine: Local+Qwen fallback
 """
     if TRY_RICH:
         console.print(Panel(txt, title="TokenCode Boot", style="bold cyan"))
